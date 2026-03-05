@@ -92,22 +92,24 @@ function getOAuthToken() {
 const CACHE_MAX_AGE = 60;
 let _pruneDone = false;
 
+function readCache(cachePath) {
+  try {
+    if (existsSync(cachePath)) return JSON.parse(readFileSync(cachePath, "utf-8"));
+  } catch { /* corrupted */ }
+  return null;
+}
+
 async function fetchUsage(sessionId) {
   const cachePath = join(tmpdir(), `claude_usage_cache_${sessionId}.json`);
+  const cached = readCache(cachePath);
 
-  if (existsSync(cachePath)) {
+  if (cached) {
     const age = (Date.now() - statSync(cachePath).mtimeMs) / 1000;
-    if (age < CACHE_MAX_AGE) {
-      try {
-        return JSON.parse(readFileSync(cachePath, "utf-8"));
-      } catch {
-        // corrupted cache, re-fetch
-      }
-    }
+    if (age < CACHE_MAX_AGE) return cached;
   }
 
   const token = getOAuthToken();
-  if (!token) return null;
+  if (!token) return cached;
 
   try {
     const resp = await fetch("https://api.anthropic.com/api/oauth/usage", {
@@ -118,9 +120,12 @@ async function fetchUsage(sessionId) {
       },
       signal: AbortSignal.timeout(5000),
     });
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      if (cached) writeFileSync(cachePath, JSON.stringify(cached), { mode: 0o600 });
+      return cached;
+    }
     const data = await resp.json();
-    if (!data.five_hour && !data.seven_day) return null;
+    if (!data.five_hour && !data.seven_day) return cached;
     writeFileSync(cachePath, JSON.stringify(data), { mode: 0o600 });
     // Prune stale cache files older than 24h (best-effort, once per process)
     if (!_pruneDone) {
@@ -136,7 +141,7 @@ async function fetchUsage(sessionId) {
     }
     return data;
   } catch {
-    return null;
+    return cached;
   }
 }
 
